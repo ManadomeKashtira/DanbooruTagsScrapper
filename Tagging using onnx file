@@ -1,0 +1,88 @@
+#===========================================================================================================
+%pip install onnxruntime Pillow numpy
+!wget https://huggingface.co/cella110n/cl_tagger/resolve/main/cl_tagger_1_01/model_optimized.onnx
+!wget https://huggingface.co/cella110n/cl_tagger/resolve/main/cl_tagger_1_01/tag_mapping.json
+#===========================================================================================================
+
+import os
+from PIL import Image
+import numpy as np
+import onnxruntime
+import json
+
+# Load model and tag mapping 
+ort_session = onnxruntime.InferenceSession("model_optimized.onnx")
+with open("tag_mapping.json", "r") as f:
+    tag_mapping = json.load(f)
+
+
+def preprocess_image(image_path):
+    """
+    Preprocesses an image for model inference.
+
+    Args:
+        image_path: Path to the image file.
+
+    Returns:
+        A preprocessed NumPy array of the image.
+    """
+    img = Image.open(image_path)
+    img = img.convert("RGB")
+    img = img.resize((448, 448))  # Reverting to fixed size resize
+    img_array = np.array(img)
+    img_array = img_array / 255.0
+    img_array = img_array.transpose(2, 0, 1)  # Change from HxWxD to DxHxW
+    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+    return img_array
+
+def sigmoid(x):
+    """Applies the sigmoid function to a NumPy array."""
+    return 1 / (1 + np.exp(-x))
+
+image_dir = "/content/imgdata"
+input_name = ort_session.get_inputs()[0].name
+
+for filename in os.listdir(image_dir):
+    image_path = os.path.join(image_dir, filename)
+    if os.path.isfile(image_path) and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        preprocessed_image = preprocess_image(image_path)
+        # Run inference
+        ort_inputs = {input_name: preprocessed_image.astype(np.float32)}
+        ort_outputs = ort_session.run(None, ort_inputs)
+        raw_output = ort_outputs[0]
+
+        # Process results
+        probabilities = sigmoid(raw_output[0])
+        image_tags_with_scores = []
+        threshold = 0.5 # Define the confidence threshold for this cell
+
+        for i, prob in enumerate(probabilities):
+            tag_info = tag_mapping.get(str(i))
+            if tag_info and prob > threshold:
+                image_tags_with_scores.append({
+                    'tag': tag_info['tag'],
+                    'category': tag_info['category'],
+                    'score': prob
+                })
+
+        # Group tags by category
+        tags_by_category = {}
+        for tag_data in image_tags_with_scores:
+            category = tag_data['category']
+            if category not in tags_by_category:
+                tags_by_category[category] = []
+            tags_by_category[category].append({'tag': tag_data['tag'], 'score': tag_data['score']})
+
+        # Store tags in a text file
+        base_filename, _ = os.path.splitext(filename)
+        output_filename = f"{base_filename}.txt"
+        output_filepath = os.path.join(image_dir, output_filename)
+
+        with open(output_filepath, "w") as f:
+            all_tags = []
+            for category, tags in tags_by_category.items():
+                for tag_data in tags:
+                    all_tags.append(tag_data['tag'])
+            f.write(", ".join(all_tags))
+
+        print(f"Processed {filename} and saved tags to {output_filename}")
